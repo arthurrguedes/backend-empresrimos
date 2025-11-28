@@ -11,7 +11,6 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// Teste de conexão
 pool.getConnection((err, conn) => {
     if (err) console.error("Erro ao conectar no MySQL (Empréstimos):", err);
     else {
