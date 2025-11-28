@@ -2,18 +2,19 @@ const db = require('../db');
 const axios = require('axios');
 require('dotenv').config();
 
-// URLs dos outros serviços
 const URL_RESERVAS = process.env.URL_RESERVAS || 'http://localhost:4003/reservas';
 const URL_CATALOGO = process.env.URL_CATALOGO || 'http://localhost:4002/books';
 const URL_USUARIOS = process.env.URL_USUARIOS || 'http://localhost:3006/users';
 
 const emprestimosController = {
 
-    // --- CREATE ---
+    // Criar empréstimos
     createEmprestimo: async (req, res) => {
         const { idReserva } = req.body;
         const idBibliotecarioLogado = req.userId; 
-        const authHeader = req.headers.authorization;
+        
+        //Recebe o token JWT
+        const authHeader = req.headers['authorization']; 
 
         if (!idReserva) return res.status(400).json({ message: "ID da reserva é obrigatório." });
 
@@ -22,17 +23,19 @@ const emprestimosController = {
         try {
             await connection.beginTransaction();
 
-            // 1. Buscar Reserva
+            // buscar reserva
             let reserva;
             try {
+                console.log(`Buscando reserva ${idReserva} em ${URL_RESERVAS}/${idReserva}`);
+                
                 const response = await axios.get(`${URL_RESERVAS}/${idReserva}`, {
                     headers: { Authorization: authHeader }
                 });
                 reserva = response.data;
             } catch (error) {
                 await connection.rollback();
-                if (error.response?.status === 401) return res.status(401).json({ message: "Não autorizado no serviço de Reservas." });
-                return res.status(404).json({ message: "Reserva não encontrada." });
+                console.error("Erro ao buscar reserva:", error.message);
+                return res.status(404).json({ message: "Não foi possível acessar a reserva." });
             }
 
             if (reserva.statusReserva !== 'Ativa') {
@@ -40,12 +43,12 @@ const emprestimosController = {
                 return res.status(400).json({ message: `Reserva não está ativa (Status: ${reserva.statusReserva}).` });
             }
 
-            // 2. Datas
+            // Definição das datas dos emprestimos
             const dataAtual = new Date();
             const dataPrevista = new Date();
             dataPrevista.setDate(dataAtual.getDate() + 7);
 
-            // 3. Inserir Empréstimo
+            // Gerar empréstimos
             const [result] = await connection.query(
                 `INSERT INTO emprestimo 
                 (dataEmprestimo, dataPrevista, status, idUsuario, idBibliotecario, idLivro) 
@@ -53,32 +56,49 @@ const emprestimosController = {
                 [dataPrevista, reserva.idUsuario, idBibliotecarioLogado, reserva.idLivro]
             );
 
-            // 4. Atualizar Reserva
+            // Atualizar reserva
             try {
-                // [CORREÇÃO] Enviando 'Concluido' (Masculino) conforme sua preferência
-                await axios.put(`${URL_RESERVAS}/${idReserva}`, {
-                    statusReserva: 'Concluido', 
-                    dataRetirada: new Date().toISOString()
-                }, { headers: { Authorization: authHeader } });
+                console.log(`Tentando atualizar reserva ${idReserva} para 'Concluido'...`);
+                
+                await axios.put(
+                    `${URL_RESERVAS}/${idReserva}`, 
+                    {
+                        statusReserva: 'Concluido',
+                        dataRetirada: new Date().toISOString().slice(0, 19).replace('T', ' ')  //formato da data
+                    }, 
+                    { headers: { Authorization: authHeader } }
+                );
+                
+                console.log("Reserva atualizada com sucesso!");
+
             } catch (err) {
-                console.error("Aviso: Falha ao atualizar reserva remota.", err.message);
+                console.error("Crítico: Falha ao atualizar reserva remota.");
+                console.error("Status:", err.response?.status);
+                console.error("Dados:", err.response?.data);
+                             
+                await connection.rollback(); 
+                return res.status(500).json({ 
+                    message: "Erro ao finalizar a reserva. O empréstimo foi cancelado.",
+                    detalhe: err.response?.data?.message || err.message
+                });
             }
-            
+
             await connection.commit();
             res.status(201).json({ 
-                message: "Empréstimo criado com sucesso!", 
+                message: "Empréstimo criado e reserva concluída!", 
                 idEmprestimo: result.insertId 
             });
 
         } catch (error) {
-            await connection.rollback();
+            if (connection) await connection.rollback();
+            console.error("Erro Geral:", error);
             res.status(500).json({ error: error.message });
         } finally {
-            connection.release();
+            if (connection) connection.release();
         }
     },
 
-    // --- GET ALL (ADMIN) ---
+    // Listar todos os empréstimos (admin)
     getAllEmprestimos: async (req, res) => {
         try {
             const [rows] = await db.query(`SELECT * FROM emprestimo ORDER BY dataEmprestimo DESC`);
@@ -87,25 +107,22 @@ const emprestimosController = {
                 let titulo = 'Indisponível';
                 let nomeUsuario = `User #${emp.idUsuario}`;
                 
-                // Busca Título
+                // Busca título
                 try {
                     const bookRes = await axios.get(`${URL_CATALOGO}/${emp.idLivro}`);
                     titulo = bookRes.data.titulo;
                 } catch (e) {}
 
-                // Busca Nome Usuário (Opcional, se tiver endpoint)
-                // try { const userRes = await axios.get(`${URL_USUARIOS}/${emp.idUsuario}`); nomeUsuario = userRes.data.nome; } catch(e) {}
-                
-                // [CORREÇÃO] Mapeamento para o Front-end
+                // mapeamento front-end
                 return {
-                    idEmprestimo: emp.id,              // Front espera idEmprestimo
+                    idEmprestimo: emp.id,              
                     idLivro: emp.idLivro,
                     titulo: titulo,
-                    usuario_info: nomeUsuario,         // Front espera usuario_info
+                    usuario_info: nomeUsuario,        
                     dataEmprestimo: emp.dataEmprestimo,
-                    dataDevolucaoPrevista: emp.dataPrevista, // Front espera dataDevolucaoPrevista
-                    dataDevolucaoReal: emp.dataDevolucao,    // Front espera dataDevolucaoReal
-                    statusEmprestimo: emp.status,            // Front espera statusEmprestimo
+                    dataDevolucaoPrevista: emp.dataPrevista, 
+                    dataDevolucaoReal: emp.dataDevolucao,    
+                    statusEmprestimo: emp.status,           
                     multa: emp.multa
                 };
             }));
@@ -116,7 +133,7 @@ const emprestimosController = {
         }
     },
 
-    // --- MY LOANS (USUARIO) ---
+    // Meus empréstimos (usuário)
     getMyEmprestimos: async (req, res) => {
         const idUsuario = req.userId;
         try {
@@ -131,10 +148,10 @@ const emprestimosController = {
                 try {
                     const bookRes = await axios.get(`${URL_CATALOGO}/${emp.idLivro}`);
                     titulo = bookRes.data.titulo;
-                    editora = bookRes.data.editora; // Front usa editora
+                    editora = bookRes.data.editora; 
                 } catch (e) {}
 
-                // [CORREÇÃO] Mapeamento
+                // mapeamento front-end
                 return {
                     idEmprestimo: emp.id,
                     titulo: titulo,
@@ -151,7 +168,7 @@ const emprestimosController = {
         }
     },
 
-    // --- GET BY ID ---
+    // Buscar por ID
     getEmprestimoById: async (req, res) => {
         const { id } = req.params;
         try {
@@ -178,9 +195,9 @@ const emprestimosController = {
         }
     },
 
-    // --- DEVOLVER ---
+    // Devolução do livro
     devolverLivro: async (req, res) => {
-        const { id } = req.params; // Aqui chega o idEmprestimo
+        const { id } = req.params; // idEmprestimo
         const connection = await db.getConnection();
 
         try {
@@ -208,8 +225,6 @@ const emprestimosController = {
                 valorMulta = diffDias * 2.50; 
             }
 
-            // Atualiza status para 'Devolvido' (Capitalizado para consistência se quiser, ou Uppercase)
-            // No create usei 'Ativo', aqui uso 'Devolvido'.
             await connection.query(
                 `UPDATE emprestimo 
                  SET status = 'Devolvido', dataDevolucao = NOW(), multa = ? 

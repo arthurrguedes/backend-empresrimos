@@ -3,19 +3,19 @@ const router = express.Router();
 const controller = require('../controllers/emprestimosController');
 const auth = require('../middlewares/auth');
 
-// 1. Criar
+// Criar
 router.post('/', auth, controller.createEmprestimo);
 
-// 2. Listar Todos
+// Listar todos
 router.get('/', auth, controller.getAllEmprestimos);
 
-// 3. Meus Empréstimos (Deve vir ANTES de /:id)
+// Meus empréstimos
 router.get('/meus', auth, controller.getMyEmprestimos);
 
-// 4. Devolver
+// Devolução
 router.put('/:id/devolver', auth, controller.devolverLivro);
 
-// 5. Buscar por ID (Esta é a rota que estava causando erro se a função não existisse)
+// Buscar por ID
 router.get('/:id', auth, controller.getEmprestimoById);
 
 module.exports = router;
