@@ -12,8 +12,6 @@ const emprestimosController = {
     createEmprestimo: async (req, res) => {
         const { idReserva } = req.body;
         const idBibliotecarioLogado = req.userId; 
-        
-        //Recebe o token JWT
         const authHeader = req.headers['authorization']; 
 
         if (!idReserva) return res.status(400).json({ message: "ID da reserva é obrigatório." });
@@ -23,32 +21,26 @@ const emprestimosController = {
         try {
             await connection.beginTransaction();
 
-            // buscar reserva
+            // 1. Buscar reserva
             let reserva;
             try {
-                console.log(`Buscando reserva ${idReserva} em ${URL_RESERVAS}/${idReserva}`);
-                
                 const response = await axios.get(`${URL_RESERVAS}/${idReserva}`, {
                     headers: { Authorization: authHeader }
                 });
                 reserva = response.data;
             } catch (error) {
-                await connection.rollback();
-                console.error("Erro ao buscar reserva:", error.message);
-                return res.status(404).json({ message: "Não foi possível acessar a reserva." });
+                throw new Error(`Erro ao buscar reserva: ${error.message}`);
             }
 
             if (reserva.statusReserva !== 'Ativa') {
-                await connection.rollback();
-                return res.status(400).json({ message: `Reserva não está ativa (Status: ${reserva.statusReserva}).` });
+                throw new Error(`Reserva não está ativa (Status: ${reserva.statusReserva}).`);
             }
 
-            // Definição das datas dos emprestimos
+            // 2. Inserir Empréstimo
             const dataAtual = new Date();
             const dataPrevista = new Date();
             dataPrevista.setDate(dataAtual.getDate() + 7);
 
-            // Gerar empréstimos
             const [result] = await connection.query(
                 `INSERT INTO emprestimo 
                 (dataEmprestimo, dataPrevista, status, idUsuario, idBibliotecario, idLivro) 
@@ -56,45 +48,52 @@ const emprestimosController = {
                 [dataPrevista, reserva.idUsuario, idBibliotecarioLogado, reserva.idLivro]
             );
 
-            // Atualizar reserva
+            // 3. Atualizar reserva no outro microsserviço
             try {
-                console.log(`Tentando atualizar reserva ${idReserva} para 'Concluido'...`);
-                
+                console.log(`Tentando atualizar reserva ${idReserva}...`);
                 await axios.put(
                     `${URL_RESERVAS}/${idReserva}`, 
                     {
                         statusReserva: 'Concluido',
-                        dataRetirada: new Date().toISOString().slice(0, 19).replace('T', ' ')  //formato da data
+                        dataRetirada: new Date().toISOString().slice(0, 19).replace('T', ' ')
                     }, 
                     { headers: { Authorization: authHeader } }
                 );
-                
                 console.log("Reserva atualizada com sucesso!");
-
             } catch (err) {
-                console.error("Crítico: Falha ao atualizar reserva remota.");
-                console.error("Status:", err.response?.status);
-                console.error("Dados:", err.response?.data);
-                             
-                await connection.rollback(); 
-                return res.status(500).json({ 
-                    message: "Erro ao finalizar a reserva. O empréstimo foi cancelado.",
-                    detalhe: err.response?.data?.message || err.message
-                });
+                // Se falhar na API externa, lançamos erro para cair no catch principal e fazer rollback do banco
+                const msgErro = err.response?.data?.message || err.message;
+                throw new Error(`Falha ao atualizar reserva remota: ${msgErro}`);
             }
 
+            // 4. Confirmar transação
             await connection.commit();
-            res.status(201).json({ 
+            
+            return res.status(201).json({ 
                 message: "Empréstimo criado e reserva concluída!", 
                 idEmprestimo: result.insertId 
             });
 
         } catch (error) {
-            if (connection) await connection.rollback();
-            console.error("Erro Geral:", error);
-            res.status(500).json({ error: error.message });
+            console.error("--- ERRO NO CREATE EMPRESTIMO ---");
+            console.error(error); // Isso vai mostrar o erro real no console
+
+            // Rollback seguro: Tenta desfazer, mas não quebra se a conexão já estiver fechada
+            try {
+                if (connection) await connection.rollback();
+            } catch (rbError) {
+                console.error("Aviso: Falha ao realizar rollback (Conexão já estava fechada).");
+            }
+
+            if (!res.headersSent) {
+                res.status(500).json({ error: error.message });
+            }
         } finally {
-            if (connection) connection.release();
+            if (connection) {
+                try {
+                    connection.release();
+                } catch (e) { /* Ignora erro de release se já fechada */ }
+            }
         }
     },
 
